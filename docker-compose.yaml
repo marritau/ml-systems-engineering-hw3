@@ -1,0 +1,195 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ["CMD", "cub", "zk-ready", "localhost", "2181"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ml-scorer
+
+  kafka:
+    image: confluentinc/cp-kafka:7.3.0
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9095:9095"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:9095
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9095
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 10s
+    networks:
+      - ml-scorer
+
+  kafka-setup:
+    image: confluentinc/cp-kafka:7.3.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - |
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic transactions --partitions 3 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic scores --partitions 3 --replication-factor 1
+    networks:
+      - ml-scorer
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    depends_on:
+      kafka-setup:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    networks:
+      - ml-scorer
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fraud_detection}
+      POSTGRES_USER: ${POSTGRES_USER:-fraud_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fraud_password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - ml-scorer
+
+  data-loader:
+    build: ./data_loader
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      LABELED_CSV_PATH: /data/train.csv
+    volumes:
+      - ${TRAIN_DATA_CSV:-./data/train.csv}:/data/train.csv:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - ml-scorer
+
+  fraud-detector:
+    build: ./fraud_detector
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TRANSACTIONS_TOPIC: transactions
+      KAFKA_SCORES_TOPIC: scores
+      KAFKA_GROUP_ID: ml-scorer
+      MODELS_DIR: /models
+      CPU_THREADS: 1
+      SCORING_BATCH_SIZE: 500
+    volumes:
+      - model-registry:/models
+    depends_on:
+      kafka-setup:
+        condition: service_completed_successfully
+    networks:
+      - ml-scorer
+
+  score-writer:
+    build: ./score_writer
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_SCORES_TOPIC: scores
+      KAFKA_GROUP_ID: score-writer
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-setup:
+        condition: service_completed_successfully
+    networks:
+      - ml-scorer
+
+  transaction-simulator:
+    build: ./transaction_simulator
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TRANSACTIONS_TOPIC: transactions
+      TRANSACTIONS_CSV_PATH: /data/train.csv
+      SEND_INTERVAL_SECONDS: 1
+    volumes:
+      - ${TRAIN_DATA_CSV:-./data/train.csv}:/data/train.csv:ro
+    depends_on:
+      kafka-setup:
+        condition: service_completed_successfully
+    networks:
+      - ml-scorer
+
+  airflow:
+    build: ./airflow
+    user: "0:0"
+    env_file: .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow_state/airflow.db
+      AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: 15
+      PYTHONPATH: /opt/airflow
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      TRAINING_WINDOW_MONTHS: 3
+      HISTORY_MONTHS: 36
+      SUPPLY_BATCH_SIZE: 10000
+      MODELS_DIR: /opt/airflow/models
+      DQ_REPORTS_DIR: /opt/airflow/dq_reports
+    volumes:
+      - ./dags:/opt/airflow/dags:ro
+      - ./pipeline:/opt/airflow/pipeline:ro
+      - ./fraud_detector/src:/opt/airflow/fraud_src:ro
+      - model-registry:/opt/airflow/models
+      - dq-reports:/opt/airflow/dq_reports
+      - airflow-state:/opt/airflow/airflow_state
+    ports:
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      data-loader:
+        condition: service_completed_successfully
+    networks:
+      - ml-scorer
+
+networks:
+  ml-scorer:
+    name: ml-scorer
+    driver: bridge
+
+volumes:
+  postgres-data:
+  model-registry:
+  dq-reports:
+  airflow-state:

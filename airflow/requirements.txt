@@ -1,0 +1,7 @@
+catboost==1.2.8
+geopy==2.4.1
+numpy==1.26.4
+pandas==2.1.4
+psycopg2-binary==2.9.10
+pyarrow==16.1.0
+scikit-learn==1.5.2
