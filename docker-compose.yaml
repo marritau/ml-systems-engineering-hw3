@@ -1,3 +1,5 @@
+name: fraud-monitoring-hw5
+
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.3.0
@@ -109,11 +111,15 @@ services:
       MODELS_DIR: /models
       CPU_THREADS: 1
       SCORING_BATCH_SIZE: 500
+      METRICS_PORT: 8000
+      FRAUD_THRESHOLD: 0.98
     volumes:
       - model-registry:/models
     depends_on:
       kafka-setup:
         condition: service_completed_successfully
+    ports:
+      - "8000:8000"
     networks:
       - ml-scorer
 
@@ -126,11 +132,14 @@ services:
       KAFKA_GROUP_ID: score-writer
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
+      METRICS_PORT: 8001
     depends_on:
       postgres:
         condition: service_healthy
       kafka-setup:
         condition: service_completed_successfully
+    ports:
+      - "8001:8001"
     networks:
       - ml-scorer
 
@@ -165,13 +174,11 @@ services:
       HISTORY_MONTHS: 36
       SUPPLY_BATCH_SIZE: 10000
       MODELS_DIR: /opt/airflow/models
-      DQ_REPORTS_DIR: /opt/airflow/dq_reports
     volumes:
       - ./dags:/opt/airflow/dags:ro
       - ./pipeline:/opt/airflow/pipeline:ro
       - ./fraud_detector/src:/opt/airflow/fraud_src:ro
       - model-registry:/opt/airflow/models
-      - dq-reports:/opt/airflow/dq_reports
       - airflow-state:/opt/airflow/airflow_state
     ports:
       - "8081:8080"
@@ -183,6 +190,59 @@ services:
     networks:
       - ml-scorer
 
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - fraud-detector
+      - score-writer
+      - node-exporter
+    networks:
+      - ml-scorer
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    env_file: .env
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL: 1s
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - postgres
+    networks:
+      - ml-scorer
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/rootfs"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    expose:
+      - "9100"
+    networks:
+      - ml-scorer
+
 networks:
   ml-scorer:
     name: ml-scorer
@@ -191,5 +251,6 @@ networks:
 volumes:
   postgres-data:
   model-registry:
-  dq-reports:
   airflow-state:
+  prometheus-data:
+  grafana-data:

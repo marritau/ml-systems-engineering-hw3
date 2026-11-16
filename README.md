@@ -1,121 +1,94 @@
-# Airflow retraining for fraud scoring
+# Monitoring fraud scoring service
 
-Homework 3 extends the Kafka fraud-scoring service with scheduled model retraining in Apache Airflow.
+Домашнее задание №5 по MLOps. Kafka несёт непрерывный поток транзакций, `fraud-detector` рассчитывает скор CatBoost, а `score-writer` сохраняет результат в PostgreSQL. Prometheus собирает метрики сервисов, Grafana автоматически подключает источники и дашборды.
 
 ## Architecture
 
 ```text
-train.csv -> data-loader -> PostgreSQL labeled_transactions
-                           -> Airflow supply/retraining/DQ DAGs
-Kafka transactions -> fraud-detector -> Kafka scores -> score-writer -> PostgreSQL transaction_scores
-Airflow -> model_registry -> fraud-detector hot reload
+transaction-simulator -> Kafka transactions -> fraud-detector -> Kafka scores -> score-writer -> PostgreSQL
+                                               |                                |
+                                               +---------- Prometheus ----------+
+node-exporter -------------------------------+
+Prometheus -> Grafana
+Airflow retraining -> model-registry -> fraud-detector
 ```
 
-The scorer reads transaction events from Kafka and publishes `transaction_id`, `score`, `fraud_flag` and `model_version`. It checks `model_registry/latest.json` before each scoring batch and loads a changed model without restarting its container.
-
-## Services
-
-- `zookeeper`, `kafka`, `kafka-setup`, `kafka-ui`: message transport and topic inspection.
-- `postgres`: labeled showcase, pipeline state and score results.
-- `data-loader`: initial one-time import of `train.csv`.
-- `transaction-simulator`: sends transaction events to Kafka.
-- `fraud-detector`: preprocessing and CPU CatBoost inference.
-- `score-writer`: persists scores and model versions.
-- `airflow`: scheduled supply, retraining and data-quality DAGs.
-
-## Data
-
-Download `train.csv` from the competition and place it at `data/train.csv`. The file is intentionally excluded from Git. In this workspace it was copied from the previous homework.
-
-Create the local environment file:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-If the CSV is stored elsewhere, set its absolute or relative path in `TRAIN_DATA_CSV` inside `.env`.
+`fraud-detector` проверяет файл `latest.json` перед каждым пакетом Kafka-сообщений и без перезапуска подхватывает опубликованную модель. При смене версии он обновляет Prometheus-метрику, а Grafana показывает аннотацию на дашборде.
 
 ## Start
 
+Положите размеченный `train.csv` в `data/train.csv` или укажите другой путь в `.env`:
+
 ```powershell
+Copy-Item .env.example .env
 docker compose up -d --build
 docker compose ps
 ```
 
-The first launch imports the labeled showcase and creates the initial model registry entry. Service URLs:
+Первичная загрузка данных выполняется сервисом `data-loader`. После её завершения поток начинает генерировать `transaction-simulator`.
 
-- Airflow: http://localhost:8081, credentials `admin` / `admin`
-- Kafka UI: http://localhost:8080
+## Services
 
-## Airflow DAGs
+| Service | Address | Credentials |
+| --- | --- | --- |
+| Grafana | [http://localhost:3000](http://localhost:3000) | `admin` / `admin` |
+| Prometheus | [http://localhost:9090](http://localhost:9090) | - |
+| Airflow | [http://localhost:8081](http://localhost:8081) | `admin` / `admin` |
+| Kafka UI | [http://localhost:8080](http://localhost:8080) | - |
+| Fraud detector metrics | [http://localhost:8000/metrics](http://localhost:8000/metrics) | - |
+| Score writer metrics | [http://localhost:8001/metrics](http://localhost:8001/metrics) | - |
 
-All DAGs run every five minutes with `catchup=False` and can also be triggered manually from the Airflow UI.
+Prometheus collects every target once per second. In **Status -> Targets** all three targets must be `UP`: `fraud-detector`, `score-writer` and `node-exporter`.
 
-### `supply_labeled_batch`
+## Metrics
 
-The DAG prepares, inserts, prunes and confirms a new labeled month through four dependent tasks. It copies 10,000 source rows, changes their `transaction_time` to the next calendar month and stores stable record identifiers. A retry inserts no duplicates because PostgreSQL uses `ON CONFLICT DO NOTHING`.
+`fraud-detector` publishes:
 
-History depth is 36 months. Rows older than 36 months relative to the supplied month are deleted. The pointer to the next month advances only after the batch is inserted and pruning succeeds.
+- `fraud_detector_processed_transactions_total` and `fraud_detector_fraud_transactions_total` with `us_state` and `merch` labels;
+- `fraud_detector_processing_seconds` for per-transaction scoring time;
+- `fraud_detector_score` for score distribution;
+- `fraud_detector_model_version_changes_total` and `fraud_detector_active_model_version` for hot model reloads;
+- `fraud_detector_batch_size` for transactions per model call;
+- `fraud_detector_recent_1000_category_fraud_share` for the fraud share by product category among the latest 1000 transactions.
 
-### `retrain_model`
+`fraud_detector_batch_size` is the additional metric absent from the seminar example. It helps distinguish a slower model from a larger Kafka batch: the P95 batch size is shown beside the P95 scoring duration.
 
-The DAG has the following task chain:
+`score-writer` publishes `score_writer_written_scores_total`, `score_writer_written_fraud_total`, `score_writer_write_seconds` and `score_writer_score`. Node Exporter publishes host CPU, memory, network and disk metrics.
 
-```text
-extract_training_window -> split_by_time -> preprocess_window
--> train_candidate -> check_quality -> publish_candidate
-```
+## Dashboards
 
-The training window has three months. The two earlier months are training data and the newest month is validation data; no random split is used. Preprocessing statistics are fitted only on the training part. CatBoost runs with one CPU thread.
+Grafana provisions all dashboards automatically into the `Fraud monitoring` folder:
 
-The quality gate compares candidate ROC-AUC with the currently published ROC-AUC. The first candidate is published. Later candidates are published only when their ROC-AUC is not lower. A rejected candidate does not update `latest.json` or advance the training month, so the current production model stays active.
+- **Fraud processing**: TPS, P95 scoring duration, fraud share, score density, P95 batch size, category and state fraud views. Filters `State` and `Merchant` apply to TPS and score density.
+- **Score writer**: PostgreSQL write throughput and duration, written fraud count, score density, plus a PostgreSQL panel with score count and fraud share by `model_version`.
+- **System metrics**: CPU, memory, network and free disk space from Node Exporter.
 
-Successful publication writes three files into the shared registry:
+The **Fraud processing** dashboard includes an annotation for every new model version. To demonstrate it, open Airflow, manually run `supply_labeled_batch`, then run `retrain_model`. Once the new model is published, the detector reloads it during the next scoring batch and Grafana shows the version marker.
 
-- `model_<version>.cbm`
-- `preprocessing_<version>.json`
-- `latest.json`
+## Alerts
 
-The final file is replaced atomically; the scoring service uses its new `version` for subsequent Kafka events.
+Grafana provisions two alert rules in **Alerting**:
 
-### `data_quality`
+- **High fraud share in the scoring stream**: fraud share exceeds 20% for 30 seconds.
+- **Scoring stream is stalled**: processing throughput stays below 0.01 transaction/s for 30 seconds.
 
-This DAG produces a timestamped HTML report in `/opt/airflow/dq_reports`. It checks:
-
-1. the showcase is not empty;
-2. required columns are present;
-3. `target` contains only `0` and `1`;
-4. transaction amounts are positive;
-5. timestamps can be parsed;
-6. latitude and longitude are in valid ranges;
-7. `record_id` values are unique.
-
-## Verify retraining
-
-1. Open Airflow and trigger `retrain_model`.
-2. Wait for every task to finish successfully.
-3. Check the published version:
+To verify the stalled-stream alert, stop the simulator for one minute, check **Alerting**, then start it again:
 
 ```powershell
-docker compose exec airflow ls -la /opt/airflow/models
+docker compose stop transaction-simulator
+docker compose start transaction-simulator
 ```
 
-4. Check that recently scored transactions use the version:
+To verify the high-fraud alert, temporarily set `FRAUD_THRESHOLD: 0` for `fraud-detector` in `docker-compose.yaml`, recreate that service, wait 30 seconds and then restore `0.98`.
+
+## Stop
 
 ```powershell
-docker compose exec -T postgres psql -U fraud_user -d fraud_detection -c "SELECT transaction_id, score, fraud_flag, model_version, created_at FROM transaction_scores ORDER BY created_at DESC LIMIT 20;"
+docker compose down
 ```
 
-5. Trigger `data_quality` and inspect reports:
-
-```powershell
-docker compose exec airflow ls -la /opt/airflow/dq_reports
-```
-
-## Reset
+For a complete reset of PostgreSQL, model registry, Prometheus and Grafana data:
 
 ```powershell
 docker compose down -v
 ```
-
-This removes Kafka, PostgreSQL, Airflow state, model registry and DQ reports. The next start imports the CSV again.

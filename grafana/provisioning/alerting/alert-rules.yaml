@@ -1,0 +1,99 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: fraud-service-alerts
+    folder: Fraud monitoring
+    interval: 10s
+    rules:
+      - uid: fraud-share-high
+        title: High fraud share in the scoring stream
+        condition: C
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: (sum(increase(fraud_detector_fraud_transactions_total[1m])) or vector(0)) / clamp_min(sum(increase(fraud_detector_processed_transactions_total[1m])), 1)
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            queryType: ""
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: [0.2]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              expression: A
+              refId: C
+              type: threshold
+        for: 30s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: Fraud share is above 20 percent for 30 seconds.
+        labels:
+          severity: warning
+
+      - uid: scoring-stream-stalled
+        title: Scoring stream is stalled
+        condition: C
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(increase(fraud_detector_processed_transactions_total[1m]))
+              instant: true
+              range: false
+              refId: A
+          - refId: C
+            queryType: ""
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: [0.01]
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              expression: A
+              refId: C
+              type: threshold
+        for: 30s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: No transactions are being scored.
+        labels:
+          severity: critical

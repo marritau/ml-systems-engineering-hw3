@@ -1,0 +1,123 @@
+{
+  "uid": "fraud-processing",
+  "title": "Fraud processing",
+  "tags": ["fraud", "scoring", "prometheus"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "annotations": {
+    "list": [
+      {
+        "name": "Model version changed",
+        "enable": true,
+        "datasource": {"uid": "prometheus", "type": "prometheus"},
+        "expr": "fraud_detector_model_version_changes_total unless fraud_detector_model_version_changes_total offset 30s",
+        "step": "1s",
+        "titleFormat": "Model {{version}}",
+        "textFormat": "Scoring switched to model {{version}}",
+        "iconColor": "red"
+      }
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "state",
+        "label": "State",
+        "type": "query",
+        "datasource": {"uid": "prometheus", "type": "prometheus"},
+        "definition": "label_values(fraud_detector_processed_transactions_total, us_state)",
+        "query": "label_values(fraud_detector_processed_transactions_total, us_state)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {"text": "All", "value": "$__all"}
+      },
+      {
+        "name": "merch",
+        "label": "Merchant",
+        "type": "query",
+        "datasource": {"uid": "prometheus", "type": "prometheus"},
+        "definition": "label_values(fraud_detector_processed_transactions_total{us_state=~\"$state\"}, merch)",
+        "query": "label_values(fraud_detector_processed_transactions_total{us_state=~\"$state\"}, merch)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {"text": "All", "value": "$__all"}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Scoring throughput",
+      "datasource": {"uid": "prometheus", "type": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [{"refId": "A", "expr": "sum(rate(fraud_detector_processed_transactions_total{us_state=~\"$state\",merch=~\"$merch\"}[1m]))", "legendFormat": "transactions/s"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "P95 scoring batch duration",
+      "datasource": {"uid": "prometheus", "type": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum(rate(fraud_detector_processing_seconds_bucket[1m])) by (le))", "legendFormat": "p95"}],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Fraud share",
+      "datasource": {"uid": "prometheus", "type": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [{"refId": "A", "expr": "sum(rate(fraud_detector_fraud_transactions_total{us_state=~\"$state\",merch=~\"$merch\"}[1m])) / clamp_min(sum(rate(fraud_detector_processed_transactions_total{us_state=~\"$state\",merch=~\"$merch\"}[1m])), 1)", "legendFormat": "fraud share"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Score distribution density",
+      "datasource": {"uid": "prometheus", "type": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [{"refId": "A", "expr": "sum(rate(fraud_detector_score_bucket{us_state=~\"$state\",merch=~\"$merch\"}[1m])) by (le)", "legendFormat": "<= {{le}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 5,
+      "type": "bargauge",
+      "title": "Fraud share by category among latest 1000 transactions",
+      "datasource": {"uid": "prometheus", "type": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "targets": [{"refId": "A", "expr": "fraud_detector_recent_1000_category_fraud_share", "legendFormat": "{{cat_id}}", "instant": true}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "P95 number of transactions per model call",
+      "datasource": {"uid": "prometheus", "type": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum(rate(fraud_detector_batch_size_bucket[1m])) by (le))", "legendFormat": "p95 batch size"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "id": 7,
+      "type": "barchart",
+      "title": "Fraud share by state",
+      "datasource": {"uid": "prometheus", "type": "prometheus"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 24},
+      "targets": [{"refId": "A", "expr": "sum by (us_state) (rate(fraud_detector_fraud_transactions_total[5m])) / clamp_min(sum by (us_state) (rate(fraud_detector_processed_transactions_total[5m])), 1)", "legendFormat": "{{us_state}}", "instant": true}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
+      "options": {"orientation": "auto", "showValue": "auto", "stacking": "none"}
+    }
+  ]
+}

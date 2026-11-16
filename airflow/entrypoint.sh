@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mkdir -p /opt/airflow/models /opt/airflow/dq_reports /opt/airflow/airflow_state /opt/airflow/logs
-chmod 777 /opt/airflow/models /opt/airflow/dq_reports /opt/airflow/airflow_state /opt/airflow/logs
+mkdir -p /opt/airflow/models /opt/airflow/airflow_state /opt/airflow/logs
+chmod 777 /opt/airflow/models /opt/airflow/airflow_state /opt/airflow/logs
 
 export PYTHONPATH="/opt/airflow${PYTHONPATH:+:$PYTHONPATH}"
 export AIRFLOW__CORE__EXECUTOR="${AIRFLOW__CORE__EXECUTOR:-SequentialExecutor}"

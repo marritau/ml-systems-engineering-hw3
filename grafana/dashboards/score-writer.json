@@ -1,0 +1,61 @@
+{
+  "uid": "score-writer",
+  "title": "Score writer",
+  "tags": ["postgres", "scoring", "prometheus"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Write throughput",
+      "datasource": {"uid": "prometheus", "type": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [{"refId": "A", "expr": "sum(rate(score_writer_written_scores_total[1m]))", "legendFormat": "scores/s"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}}
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "P95 PostgreSQL write duration",
+      "datasource": {"uid": "prometheus", "type": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum(rate(score_writer_write_seconds_bucket[1m])) by (le))", "legendFormat": "p95"}],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}}
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Fraud records written",
+      "datasource": {"uid": "prometheus", "type": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [{"refId": "A", "expr": "sum(rate(score_writer_written_fraud_total[1m]))", "legendFormat": "fraud scores/s"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}}
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Written score distribution density",
+      "datasource": {"uid": "prometheus", "type": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [{"refId": "A", "expr": "sum(rate(score_writer_score_bucket[1m])) by (le)", "legendFormat": "<= {{le}}"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right"}}
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "PostgreSQL scores and fraud share by model version",
+      "datasource": {"uid": "postgres", "type": "postgres"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+      "targets": [{"refId": "A", "format": "table", "rawSql": "SELECT model_version, COUNT(*) AS score_count, ROUND(AVG(fraud_flag)::numeric, 4) AS fraud_share FROM transaction_scores WHERE $__timeFilter(created_at) GROUP BY model_version ORDER BY model_version;"}],
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "options": {"showHeader": true}
+    }
+  ]
+}
